@@ -6,3 +6,5 @@ optuna
 matplotlib
 seaborn
 joblib
+xgboost
+statsmodels

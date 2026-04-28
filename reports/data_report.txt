@@ -1,0 +1,12 @@
+=== DATASET REPORT ===
+Rows: 4372
+Columns: 52
+Duplicates: 0
+Columns with missing values: 2
+
+--- Missing values detail ---
+Age                        1311
+AvgDaysBetweenPurchases      79
+
+--- Columns ---
+CustomerID, Recency, Frequency, MonetaryTotal, MonetaryAvg, MonetaryStd, MonetaryMin, MonetaryMax, TotalQuantity, AvgQuantityPerTransaction, MinQuantity, MaxQuantity, CustomerTenureDays, FirstPurchaseDaysAgo, PreferredDayOfWeek, PreferredHour, PreferredMonth, WeekendPurchaseRatio, AvgDaysBetweenPurchases, UniqueProducts, UniqueDescriptions, AvgProductsPerTransaction, UniqueCountries, NegativeQuantityCount, ZeroPriceCount, CancelledTransactions, ReturnRatio, TotalTransactions, UniqueInvoices, AvgLinesPerInvoice, Age, RegistrationDate, NewsletterSubscribed, LastLoginIP, SupportTicketsCount, SatisfactionScore, RFMSegment, AgeCategory, SpendingCategory, CustomerType, FavoriteSeason, PreferredTimeOfDay, Region, LoyaltyLevel, ChurnRiskCategory, WeekendPreference, BasketSizeCategory, ProductDiversity, Gender, AccountStatus, Country, Churn

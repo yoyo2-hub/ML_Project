@@ -1,0 +1,9 @@
+2026-04-27 18:48:47,617 - INFO - Données brutes : (4372, 52)
+2026-04-27 18:55:31,311 - INFO - Données brutes : (4372, 52)
+2026-04-28 01:06:14,175 - INFO - Saved model to models\preprocessing_pipeline.pkl
+2026-04-28 01:06:14,219 - INFO - Saved data to data\train_test\X_train_pca.csv
+2026-04-28 01:06:14,228 - INFO - Saved data to data\train_test\X_test_pca.csv
+2026-04-28 01:06:14,231 - INFO - Saved data to data\train_test\y_train.csv
+2026-04-28 01:06:14,233 - INFO - Saved data to data\train_test\y_test.csv
+2026-04-28 01:06:14,239 - INFO - Saved data to data\train_test\y_reg_train.csv
+2026-04-28 01:06:14,243 - INFO - Saved data to data\train_test\y_reg_test.csv

@@ -1,124 +1,184 @@
-import pandas as pd
-import numpy as np
-import os
-import joblib
-import seaborn as sns
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
 import matplotlib.pyplot as plt
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import KNNImputer
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.decomposition import PCA
+from sklearn.ensemble import IsolationForest
+from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from imblearn.over_sampling import SMOTE
-import optuna
-from utils import fill_age_from_cat, extract_ip_features
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-# --- CONFIGURATION DES CHEMINS DYNAMIQUES ---
-# On définit la racine du projet par rapport à l'emplacement de ce script (src/)
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INPUT_PATH = os.path.join(BASE_DIR, 'data', 'raw', 'retail_customers_COMPLETE_CATEGORICAL.csv')
+from features import FeatureEngineer
+from utils import log_report, save_data, save_json, save_model
 
-# --- 1. CHARGEMENT ---
-if not os.path.exists(INPUT_PATH):
-    raise FileNotFoundError(f"Fichier introuvable : {INPUT_PATH}")
 
-df = pd.read_csv(INPUT_PATH)
-df.columns = df.columns.str.strip()
-print("✅ Fichier chargé avec succès !")
+RAW_PATH = Path("data/raw/retail_customers_COMPLETE_CATEGORICAL.csv")
+REPORTS_DIR = Path("reports")
+DATA_OUT_DIR = Path("data/train_test")
+MODELS_DIR = Path("models")
 
-# --- 2. PARSING DE DATES ---
-df['RegistrationDate'] = pd.to_datetime(df['RegistrationDate'], dayfirst=True, errors='coerce')
-df['RegYear'] = df['RegistrationDate'].dt.year
-df['RegMonth'] = df['RegistrationDate'].dt.month
-df['RegYear'] = df['RegYear'].fillna(df['RegYear'].median())
-df['RegMonth'] = df['RegMonth'].fillna(df['RegMonth'].median())
+logging.basicConfig(
+    filename=str(REPORTS_DIR / "preprocessing.log"),
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
-# --- 3. FEATURE ENGINEERING ---
-age_map = {'18-24': 21, '25-34': 29, '35-44': 39, '45-54': 49, '55-64': 59, '65+': 72}
-df['Age'] = df.apply(lambda r: fill_age_from_cat(r, age_map), axis=1)
 
-df['AvgBasketValue'] = df['MonetaryTotal'] / (df['Frequency'] + 1)
-df['MonetaryPerDay'] = df['MonetaryTotal'] / (df['Recency'] + 1)
+def eda_report(df: pd.DataFrame) -> None:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-if 'LastLoginIP' in df.columns:
-    df[['IP_Version', 'IP_FirstOctet', 'IP_IsPrivate']] = pd.DataFrame(
-        df['LastLoginIP'].apply(extract_ip_features).tolist(), index=df.index)
+    # Missing values plot
+    missing = df.isna().mean().sort_values(ascending=False)
+    missing = missing[missing > 0]
+    if len(missing) > 0:
+        plt.figure(figsize=(10, 6))
+        missing.head(30).plot(kind="bar")
+        plt.title("Top missing ratios (30)")
+        plt.tight_layout()
+        plt.savefig(REPORTS_DIR / "missing_ratios.png", dpi=200)
+        plt.close()
 
-# --- 4. NETTOYAGE & SUPPRESSION ---
-cols_to_drop = [
-    'CustomerID', 'ChurnRiskCategory', 'AccountStatus', 
-    'RegistrationDate', 'LastLoginIP', 'NewsletterSubscribed',
-    'CustomerType', 'RFMSegment', 'LoyaltyLevel', 'Recency', 'TenureRatio'
-]
-df_ml = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+    # Basic histograms
+    important_cols = [c for c in ["Recency", "Frequency", "MonetaryTotal", "Age"] if c in df.columns]
+    if important_cols:
+        df[important_cols].hist(figsize=(12, 8), bins=30)
+        plt.tight_layout()
+        plt.savefig(REPORTS_DIR / "histograms.png", dpi=200)
+        plt.close()
 
-# --- 5. VISUALISATION (Heatmap) ---
-def generate_heatmap(df_input):
-    df_numeric = df_input.select_dtypes(include=[np.number])
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(df_numeric.corr(), annot=True, fmt=".2f", cmap='coolwarm', linewidths=0.5)
-    os.makedirs(os.path.join(BASE_DIR, 'reports'), exist_ok=True)
-    plt.title("Matrice de Corrélation des Features")
-    plt.savefig(os.path.join(BASE_DIR, 'reports', 'heatmap_correlation.png'))
-    print("✅ Heatmap sauvegardée dans reports/")
+    # Correlation (numeric)
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if len(num_cols) >= 2:
+        corr_cols = num_cols[:12]
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(df[corr_cols].corr(), cmap="coolwarm", center=0)
+        plt.title("Correlation heatmap (subset)")
+        plt.tight_layout()
+        plt.savefig(REPORTS_DIR / "correlations.png", dpi=200)
+        plt.close()
 
-generate_heatmap(df_ml)
 
-# --- 6. GESTION MULTICOLINÉARITÉ ---
-corr_matrix = df_ml.select_dtypes(include=[np.number]).corr().abs()
-upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-to_drop_corr = [column for column in upper.columns if any(upper[column] > 0.8)]
-df_ml = df_ml.drop(columns=to_drop_corr)
-print(f"🔥 Colonnes supprimées (Corrélation > 0.8) : {to_drop_corr}")
+def build_preprocessing_pipeline(n_components: int = 10) -> Pipeline:
+    numeric_selector = make_column_selector(dtype_include=np.number)
+    categorical_selector = make_column_selector(dtype_exclude=np.number)
 
-# --- 7. PRÉPARATION ML & SPLIT ---
-df_final = pd.get_dummies(df_ml, drop_first=True)
-X = df_final.drop('Churn', axis=1)
-y = df_final['Churn']
+    numeric_pipe = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ]
+    )
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    categorical_pipe = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ]
+    )
 
-# Sauvegarde Split
-split_dir = os.path.join(BASE_DIR, 'data', 'train_test')
-os.makedirs(split_dir, exist_ok=True)
-X_train.to_csv(os.path.join(split_dir, 'X_train.csv'), index=False)
-X_test.to_csv(os.path.join(split_dir, 'X_test.csv'), index=False)
-y_train.to_csv(os.path.join(split_dir, 'y_train.csv'), index=False)
-y_test.to_csv(os.path.join(split_dir, 'y_test.csv'), index=False)
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_pipe, numeric_selector),
+            ("cat", categorical_pipe, categorical_selector),
+        ],
+        remainder="drop",
+        verbose_feature_names_out=False,
+    )
 
-# --- 8. IMPUTATION, SCALING & SMOTE ---
-imputer = KNNImputer(n_neighbors=5)
-X_train_imputed = imputer.fit_transform(X_train)
-X_test_imputed = imputer.transform(X_test)
+    pipe = Pipeline(
+        steps=[
+            ("fe", FeatureEngineer(date_col="RegistrationDate")),
+            ("prep", preprocessor),
+            ("pca", PCA(n_components=n_components, random_state=42)),
+        ]
+    )
+    return pipe
 
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train_imputed)
-X_test_scaled = scaler.transform(X_test_imputed)
 
-sm = SMOTE(random_state=42)
-X_res, y_res = sm.fit_resample(X_train_scaled, y_train)
+def main() -> None:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- 9. OPTUNA & EXPORT ---
-def objective(trial):
-    param = {
-        'n_estimators': trial.suggest_int('n_estimators', 50, 200),
-        'max_depth': trial.suggest_int('max_depth', 5, 20),
-    }
-    clf = RandomForestClassifier(**param, random_state=42)
-    clf.fit(X_res, y_res)
-    return clf.score(X_test_scaled, y_test)
+    if not RAW_PATH.exists():
+        raise FileNotFoundError(f"Raw file not found: {RAW_PATH}")
 
-study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=10)
+    df = pd.read_csv(RAW_PATH)
 
-best_model = RandomForestClassifier(**study.best_params, random_state=42)
-best_model.fit(X_res, y_res)
+    # Reports
+    eda_report(df)
+    log_report(df, REPORTS_DIR / "data_report.txt")
 
-# Sauvegarde .pkl
-models_dir = os.path.join(BASE_DIR, 'models')
-os.makedirs(models_dir, exist_ok=True)
-joblib.dump(best_model, os.path.join(models_dir, 'churn_model.pkl'))
-joblib.dump(scaler, os.path.join(models_dir, 'scaler.pkl'))
-joblib.dump(imputer, os.path.join(models_dir, 'knn_imputer.pkl'))
-joblib.dump(list(X.columns), os.path.join(models_dir, 'model_columns.pkl'))
+    # Targets
+    if "Churn" not in df.columns or "MonetaryTotal" not in df.columns:
+        raise ValueError("Dataset must contain 'Churn' and 'MonetaryTotal' columns.")
 
-print("🚀 Pipeline terminé avec succès !")
+    y_class = df["Churn"].astype(int)
+    y_reg = df["MonetaryTotal"].astype(float)
+
+    # X raw (keep original columns except targets + IDs)
+    drop_cols = [c for c in ["Churn", "MonetaryTotal", "CustomerID"] if c in df.columns]
+    X = df.drop(columns=drop_cols, errors="ignore")
+
+    # Save raw schema for inference (Flask / predict_sample)
+    save_json({"raw_schema": X.columns.tolist()}, MODELS_DIR / "raw_schema.json")
+
+    X_train, X_test, y_train_class, y_test_class, y_train_reg, y_test_reg = train_test_split(
+        X,
+        y_class,
+        y_reg,
+        test_size=0.2,
+        random_state=42,
+        stratify=y_class,
+    )
+
+    # --- Optional: Outlier removal on TRAIN (numeric only, before fitting pipeline)
+    # We do it on a *temporary* numeric-only view
+    fe_tmp = FeatureEngineer(date_col="RegistrationDate")
+    X_train_tmp = fe_tmp.transform(X_train)
+
+    num_cols = X_train_tmp.select_dtypes(include=[np.number]).columns.tolist()
+    if len(num_cols) > 0:
+        iso = IsolationForest(contamination=0.06, random_state=42)
+        X_iso = X_train_tmp[num_cols].copy()
+        X_iso = X_iso.fillna(X_iso.median(numeric_only=True))
+        mask = iso.fit_predict(X_iso) == 1
+
+        X_train = X_train.loc[mask].reset_index(drop=True)
+        y_train_class = y_train_class.loc[mask].reset_index(drop=True)
+        y_train_reg = y_train_reg.loc[mask].reset_index(drop=True)
+
+    # Build + fit pipeline
+    pipe = build_preprocessing_pipeline(n_components=10)
+    X_train_pca = pipe.fit_transform(X_train)
+    X_test_pca = pipe.transform(X_test)
+
+    # Save pipeline
+    save_model(pipe, MODELS_DIR / "preprocessing_pipeline.pkl")
+
+    # Save processed matrices
+    pca_dim = X_train_pca.shape[1]
+    cols = [f"PC{i+1}" for i in range(pca_dim)]
+
+    save_data(pd.DataFrame(X_train_pca, columns=cols), DATA_OUT_DIR / "X_train_pca.csv")
+    save_data(pd.DataFrame(X_test_pca, columns=cols), DATA_OUT_DIR / "X_test_pca.csv")
+
+    save_data(pd.DataFrame({"Churn": y_train_class}), DATA_OUT_DIR / "y_train.csv")
+    save_data(pd.DataFrame({"Churn": y_test_class}), DATA_OUT_DIR / "y_test.csv")
+
+    save_data(pd.DataFrame({"MonetaryTotal": y_train_reg}), DATA_OUT_DIR / "y_reg_train.csv")
+    save_data(pd.DataFrame({"MonetaryTotal": y_test_reg}), DATA_OUT_DIR / "y_reg_test.csv")
+
+    print("Preprocessing done.")
+    print(f"Saved: {DATA_OUT_DIR}/X_train_pca.csv, X_test_pca.csv and targets.")
+
+
+if __name__ == "__main__":
+    main()
