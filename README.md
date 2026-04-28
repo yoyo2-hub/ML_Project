@@ -48,7 +48,7 @@ PCA reduces interpretability, KMeans assumes spherical clusters, and the classif
 Future work includes adding SHAP for explainability, handling class imbalance with SMOTE, improving clustering evaluation, and implementing model monitoring for data drift.
 
 ## 👩‍💻 Author
-Chayma Dallel — GI2 S3  
+Chayma Dallel   
 
 ## 📅 Date
 April 2026
